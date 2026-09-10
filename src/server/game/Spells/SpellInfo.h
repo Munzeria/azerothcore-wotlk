@@ -459,6 +459,7 @@ public:
     bool IsAbilityOfSkillType(uint32 skillType) const;
 
     bool IsAffectingArea() const;
+    bool CanBeRedirectedBySpellMagnet() const;
     bool IsTargetingArea() const;
     bool NeedsExplicitUnitTarget() const;
     bool NeedsToBeTriggeredByCaster(SpellInfo const* triggeringSpell, uint8 effIndex = MAX_SPELL_EFFECTS) const;
@@ -516,7 +517,7 @@ public:
     bool CheckTargetCreatureType(Unit const* target) const;
 
     bool IsAuraEffectEqual(SpellInfo const* otherSpellInfo) const;
-    bool ValidateAttribute6SpellDamageMods(Unit const* caster, const AuraEffect* auraEffect, bool isDot) const;
+    bool ValidateAttribute6SpellDamageMods(Unit const* caster, AuraEffect const* auraEffect, bool isDot) const;
 
     SpellSchoolMask GetSchoolMask() const;
     uint64 GetAllEffectsMechanicMask() const;

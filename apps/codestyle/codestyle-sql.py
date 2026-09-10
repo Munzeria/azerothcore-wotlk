@@ -205,10 +205,155 @@ def insert_delete_safety_check(file: io, file_path: str) -> None:
                     f"❌ Entries from {table_name} should not be deleted! {file_path} at line {line_number}\nIf this error is intended, please notify a maintainer")
                 check_failed = True
 
+    if spawn_delete_filter_check(file, file_path):
+        check_failed = True
+
     # Handle the script error and update the result output
     if check_failed:
         error_handler = True
         results["INSERT & DELETE safety usage check"] = "Failed"
+
+# Strip a trailing "-- ..." line comment while ignoring any "--" that appears
+# inside a single- or double-quoted string literal (e.g. descriptions).
+def strip_inline_comment(text: str) -> str:
+    in_single_quote = False
+    in_double_quote = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        # Skip backslash-escaped characters inside string literals (e.g. \')
+        if char == '\\' and (in_single_quote or in_double_quote):
+            index += 2
+            continue
+        if char == "'" and not in_double_quote:
+            in_single_quote = not in_single_quote
+        elif char == '"' and not in_single_quote:
+            in_double_quote = not in_double_quote
+        elif (char == '-' and index + 1 < len(text) and text[index + 1] == '-'
+              and not in_single_quote and not in_double_quote):
+            return text[:index].strip()
+        index += 1
+    return text.strip()
+
+# Count how many parentheses are still open on a line, ignoring any that appear
+# inside string literals. A positive result means a value tuple continues on the
+# following line(s).
+def open_paren_balance(text: str) -> int:
+    without_strings = re.sub(r"'(?:\\.|[^'])*'", "", text)
+    without_strings = re.sub(r'"(?:\\.|[^"])*"', "", without_strings)
+    return without_strings.count('(') - without_strings.count(')')
+
+DELETE_START = re.compile(r"\bDELETE\b", re.IGNORECASE)
+SPAWN_DELETE_START = re.compile(r"DELETE\s+FROM\s+(?:`(creature|gameobject)`|\b(creature|gameobject)\b)", re.IGNORECASE)
+# Only these bound a delete to known rows: `guid` > 0 or `id` != 5 match without limiting.
+SPAWN_FILTER_OPERATORS = r"(?:=|\bIN\b|\bBETWEEN\b)"
+
+# The column token has to be bounded on both sides, otherwise `guid` would satisfy the `id`
+# requirement and `id1`/`id2`/`id3` (the pre-rename creature columns) would pass as `id`.
+def has_column_filter(statement: str, column: str) -> bool:
+    pattern = rf"(?:`{column}`|(?<![\w@`]){column}(?![\w`]))\s*{SPAWN_FILTER_OPERATORS}"
+    return re.search(pattern, statement, re.IGNORECASE) is not None
+
+# Walk the line left to right dropping quoted literals and both comment styles, so a "--", a "/*"
+# or a ";" inside a string is not taken for a comment or a statement terminator. Returns the
+# sanitised text plus whether a block comment is left open for the following lines.
+def strip_sql_noise(text: str, in_block_comment: bool) -> tuple:
+    sanitized = []
+    index = 0
+    while index < len(text):
+        if in_block_comment:
+            closing = text.find('*/', index)
+            if closing == -1:
+                break
+            in_block_comment = False
+            index = closing + 2
+            sanitized.append(' ')
+            continue
+        if text.startswith('/*', index):
+            in_block_comment = True
+            index += 2
+            continue
+        if text.startswith('--', index) or text[index] == '#':
+            break
+        if text[index] in "'\"":
+            quote = text[index]
+            index += 1
+            while index < len(text):
+                if text[index] == '\\':
+                    index += 2
+                    continue
+                if text[index] == quote:
+                    index += 1
+                    break
+                index += 1
+            sanitized.append("''")
+            continue
+        sanitized.append(text[index])
+        index += 1
+    return ''.join(sanitized).strip(), in_block_comment
+
+# Spawns in `creature` and `gameobject` must be deleted by both `id` and `guid`: a guid-only delete
+# wipes whatever spawn owns that guid today, an id-only one wipes every spawn of that entry in the
+# world. Returns whether a violation was found; the caller owns the result state.
+def spawn_delete_filter_check(file: io, file_path: str) -> bool:
+    file.seek(0)  # Reset file pointer to the beginning
+    check_failed = False
+    in_block_comment = False
+    statement = ""
+    statement_line = 0
+
+    def report(text: str, line_number: int, table: str) -> bool:
+        # A disjunction needs real boolean parsing to judge, so it is refused rather than guessed at
+        if re.search(r"\bOR\b", text, re.IGNORECASE):
+            print(f"❌ DELETE FROM `{table}` must not use OR. Use IN, or split it into one statement per "
+                  f"spawn. {file_path} at line {line_number}\n"
+                  f"If this error is intended, please notify a maintainer")
+            return True
+        missing = [column for column in ("id", "guid") if not has_column_filter(text, column)]
+        if not missing:
+            return False
+        columns = " and ".join(f"`{column}`" for column in missing)
+        print(f"❌ DELETE FROM `{table}` must filter on both `id` and `guid` (missing: {columns}). "
+              f"{file_path} at line {line_number}\nIf this error is intended, please notify a maintainer")
+        return True
+
+    # Judged once the whole statement is accumulated, since DELETE, FROM and the table name can
+    # each sit on their own line
+    def report_when_spawn_delete(text: str, line_number: int) -> bool:
+        table = SPAWN_DELETE_START.search(text)
+        if not table:
+            return False
+        return report(text, line_number, table.group(1) or table.group(2))
+
+    for line_number, line in enumerate(file, start = 1):
+        text, in_block_comment = strip_sql_noise(line.strip(), in_block_comment)
+        if not text:
+            continue
+
+        remainder = text
+        while remainder:
+            if statement:
+                segment, terminator, rest = remainder.partition(';')
+                statement += " " + segment
+            else:
+                match = DELETE_START.search(remainder)
+                if not match:
+                    break
+                statement_line = line_number
+                segment, terminator, rest = remainder[match.start():].partition(';')
+                statement = segment
+            if not terminator:
+                break
+            if report_when_spawn_delete(statement, statement_line):
+                check_failed = True
+            statement = ""
+            remainder = rest.strip()
+
+    # An unterminated statement is reported by semicolon_check, but still judge it here
+    if statement and report_when_spawn_delete(statement, statement_line):
+        check_failed = True
+
+    return check_failed
 
 def semicolon_check(file: io, file_path: str) -> None:
     global error_handler, results
@@ -255,8 +400,8 @@ def semicolon_check(file: io, file_path: str) -> None:
         if not stripped_line and not inside_values_block:
             continue
 
-        # Remove inline comments after SQL
-        stripped_line = stripped_line.split('--', 1)[0].strip()
+        # Remove inline comments after SQL (ignoring "--" inside string literals)
+        stripped_line = strip_inline_comment(stripped_line)
 
         if stripped_line.upper().startswith("SET") and not stripped_line.endswith(";"):
             print(f"❌ Missing semicolon in {file_path} at line {line_number}")
@@ -266,10 +411,29 @@ def semicolon_check(file: io, file_path: str) -> None:
         if not query_open and any(keyword in stripped_line.upper() for keyword in ["SELECT", "INSERT", "UPDATE", "DELETE", "REPLACE"]):
             query_open = True
 
-        # Detect start of multi-line VALUES block
-        if any(kw in stripped_line.upper() for kw in ["INSERT", "REPLACE"]) and "VALUES" in stripped_line.upper():
-            inside_values_block = True
+        # Detect start of a VALUES block
+        upper_line = stripped_line.upper()
+        if any(kw in upper_line for kw in ["INSERT", "REPLACE"]) and "VALUES" in upper_line:
             query_open = True  # Ensure query is marked open too
+            # Look at whatever follows the VALUES keyword on this same line
+            tail = stripped_line[upper_line.rfind("VALUES") + len("VALUES"):].strip()
+            if not tail or tail.endswith(','):
+                # Multi-line VALUES block: value rows follow on subsequent lines
+                inside_values_block = True
+            elif open_paren_balance(stripped_line) > 0:
+                # A value tuple is still open (row split across lines, or the line
+                # ends with '('); leave the statement open so the terminator is
+                # validated once the tuple closes on a following line.
+                pass
+            elif tail.endswith(';'):
+                # Complete single-line insert
+                query_open = False
+            else:
+                # Inline insert whose value tuple(s) are complete on this same line
+                # but the statement is not terminated with a semicolon
+                print(f"❌ Missing semicolon in {file_path} at line {line_number}")
+                check_failed = True
+                query_open = False
 
         if inside_values_block:
             if not stripped_line:
