@@ -133,17 +133,18 @@ enum Classes
     CLASS_MAGE          = 8, // TITLE Mage
     CLASS_WARLOCK       = 9, // TITLE Warlock
     //CLASS_UNK           = 10,
-    CLASS_DRUID         = 11 // TITLE Druid
+    CLASS_DRUID         = 11, // TITLE Druid
+    CLASS_SENTINEL      = 12 // TITLE SENTINEL
 };
 
 // max+1 for player class
-#define MAX_CLASSES       12
+#define MAX_CLASSES       13
 
 #define CLASSMASK_ALL_PLAYABLE \
     ((1<<(CLASS_WARRIOR-1))|(1<<(CLASS_PALADIN-1))|(1<<(CLASS_HUNTER-1))| \
     (1<<(CLASS_ROGUE-1))  |(1<<(CLASS_PRIEST-1)) |(1<<(CLASS_SHAMAN-1))| \
     (1<<(CLASS_MAGE-1))   |(1<<(CLASS_WARLOCK-1))|(1<<(CLASS_DRUID-1)) | \
-    (1<<(CLASS_DEATH_KNIGHT-1)))
+    (1<<(CLASS_DEATH_KNIGHT-1)) |(1<<(CLASS_SENTINEL-1)))
 
 // valid classes for creature_template.unit_class
 #define CLASSMASK_ALL_CREATURES ((1<<(CLASS_WARRIOR-1)) | (1<<(CLASS_PALADIN-1)) | (1<<(CLASS_ROGUE-1)) | (1<<(CLASS_MAGE-1)))
